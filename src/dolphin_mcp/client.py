@@ -181,8 +181,9 @@ class MCPClient:
         await self._send_message(req)
 
         start = asyncio.get_event_loop().time()
-        timeout = 3600  # Increased timeout to 30 seconds
+        timeout = 300 # Timeout 5 minutes
         while asyncio.get_event_loop().time() - start < timeout:
+            # print(json.dumps(self.responses))
             if rid in self.responses:
                 resp = self.responses[rid]
                 del self.responses[rid]
@@ -193,8 +194,9 @@ class MCPClient:
                     elapsed = asyncio.get_event_loop().time() - start
                     logger.info(f"Server {self.server_name}: Tool {tool_name} completed in {elapsed:.2f}s")
                     return resp["result"]
-            await asyncio.sleep(0.01)  # Reduced sleep interval for more responsive streaming
-            if asyncio.get_event_loop().time() - start > 5:  # Log warning after 5 seconds
+            await asyncio.sleep(0.1)  # Reduced sleep interval for more responsive streaming
+            if asyncio.get_event_loop().time() - start > 5 and asyncio.get_event_loop().time() - start < 5.15:  # Log warning after 5 seconds
+                print(f"Server {self.server_name}: Tool {tool_name} taking longer than 5s...")
                 logger.warning(f"Server {self.server_name}: Tool {tool_name} taking longer than 5s...")
         logger.error(f"Server {self.server_name}: Tool {tool_name} timed out after {timeout}s")
         return {"error": f"Timeout waiting for tool result after {timeout}s"}
@@ -357,10 +359,7 @@ async def process_tool_call(tc: Dict, servers: Dict[str, MCPClient], quiet_mode:
         }
 
     srv_name, tool_name = parts
-    if not quiet_mode:
-        print(f"\nView result from {tool_name} from {srv_name} {json.dumps(func_args)}")
-    else:
-        print(f"\nProcessing tool call...{tool_name}")
+    print(f"\nProcessing tool call...{srv_name}.{tool_name}")
 
     if srv_name not in servers:
         return {
@@ -382,22 +381,28 @@ async def process_tool_call(tc: Dict, servers: Dict[str, MCPClient], quiet_mode:
         required_params = tool_schema.get("required", [])
         for param in required_params:
             if param not in func_args:
+                print(f"Missing required parameter: {param}")
                 return {
                     "role": "tool",
                     "tool_call_id": tc["id"],
                     "name": func_name,
                     "content": json.dumps({"error": f"Missing required parameter: {param}"})
                 }
+    
+    if not quiet_mode:
+        print(json.dumps(func_args))
 
     result = await servers[srv_name].call_tool(tool_name, func_args)
+    if not isinstance(result, str):
+        result = json.dumps(result)
     if not quiet_mode:
-        print(json.dumps(result, indent=2))
+        print(result)
 
     return {
         "role": "tool",
         "tool_call_id": tc["id"],
         "name": func_name,
-        "content": json.dumps(result)
+        "content": result
     }
 
 async def run_interaction(
@@ -407,7 +412,8 @@ async def run_interaction(
     config_path: str = "mcp_config.json",
     quiet_mode: bool = False,
     log_messages_path: Optional[str] = None,
-    stream: bool = False
+    stream: bool = False,
+    persist_conversation_to_file: str = None,
 ) -> Union[str, AsyncGenerator[str, None]]:
     """
     Run an interaction with the MCP servers.
@@ -420,7 +426,7 @@ async def run_interaction(
         quiet_mode: Whether to suppress intermediate output (default: False)
         log_messages_path: Path to log messages in JSONL format (optional)
         stream: Whether to stream the response (default: False)
-        
+        persist_conversation_to_file: Path to save the conversation to a JSONL file (optional)
     Returns:
         If stream=False: The final text response
         If stream=True: AsyncGenerator yielding chunks of the response
@@ -525,7 +531,25 @@ async def run_interaction(
             except Exception as e:
                 logger.warning(f"Failed to read system message file: {e}")
 
+    async def add_interaction_to_file(interaction: Dict):
+        if persist_conversation_to_file:
+            with open(persist_conversation_to_file, "a") as f:
+                f.write(json.dumps(interaction) + "\n")
+
+    if persist_conversation_to_file:
+        # check if the file exists
+        if os.path.exists(persist_conversation_to_file):
+            # load the conversation from the JSONL file
+            with open(persist_conversation_to_file, "r") as f:
+                for line in f:
+                    conversation.append(json.loads(line))
+        else:
+            # create the file
+            with open(persist_conversation_to_file, "w") as f:
+                pass
+
     conversation.append({"role": "user", "content": user_query})
+    await add_interaction_to_file({"role": "user", "content": user_query})
 
     async def cleanup():
         """Clean up servers and log messages"""
@@ -566,6 +590,7 @@ async def run_interaction(
                                     "tool_calls": tool_calls
                                 }
                                 conversation.append(assistant_message)
+                                await add_interaction_to_file(assistant_message)
                                 
                                 # Process each tool call
                                 for tc in tool_calls:
@@ -573,6 +598,7 @@ async def run_interaction(
                                         result = await process_tool_call(tc, servers, quiet_mode)
                                         if result:
                                             conversation.append(result)
+                                            await add_interaction_to_file(result)
                                             tool_calls_processed = True
                     
                     # Break the loop if no tool calls were processed
@@ -598,6 +624,7 @@ async def run_interaction(
                 if tool_calls:
                     assistant_message["tool_calls"] = tool_calls
                 conversation.append(assistant_message)
+                await add_interaction_to_file(assistant_message)
                 logger.info(f"Added assistant message: {json.dumps(assistant_message, indent=2)}")
 
                 if not tool_calls:
@@ -607,6 +634,7 @@ async def run_interaction(
                     result = await process_tool_call(tc, servers, quiet_mode)
                     if result:
                         conversation.append(result)
+                        await add_interaction_to_file(result)
                         logger.info(f"Added tool result: {json.dumps(result, indent=2)}")
 
             return final_text

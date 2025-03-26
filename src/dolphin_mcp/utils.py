@@ -45,13 +45,14 @@ def parse_arguments():
     Parse command-line arguments.
     
     Returns:
-        Tuple containing (chosen_model, user_query, quiet_mode, config_path, log_messages_path)
+        Tuple containing (chosen_model, user_query, quiet_mode, config_path, log_messages_path, conversation_file)
     """
     args = sys.argv[1:]
     chosen_model = None
     quiet_mode = False
     config_path = "mcp_config.json"  # default
     log_messages_path = None
+    conversation_file = None
     user_query_parts = []
     i = 0
     while i < len(args):
@@ -79,6 +80,13 @@ def parse_arguments():
             else:
                 print("Error: --log-messages requires an argument")
                 sys.exit(1)
+        elif args[i] == "--conversation-file":
+            if i + 1 < len(args):
+                conversation_file = args[i+1]
+                i += 2
+            else:
+                print("Error: --conversation-file requires an argument")
+                sys.exit(1)
         elif args[i] == "--help" or args[i] == "-h":
             # Skip help flags as they're handled in the main function
             i += 1
@@ -87,4 +95,4 @@ def parse_arguments():
             i += 1
 
     user_query = " ".join(user_query_parts)
-    return chosen_model, user_query, quiet_mode, config_path, log_messages_path
+    return chosen_model, user_query, quiet_mode, config_path, log_messages_path, conversation_file

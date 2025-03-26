@@ -314,8 +314,35 @@ async def generate_with_anthropic(conversation, model_cfg, all_functions):
         if top_k is not None and isinstance(top_k, int):
             api_params["top_k"] = top_k
 
+        # cf https://docs.anthropic.com/en/docs/build-with-claude/tool-use/token-efficient-tool-use
+        # api_params["betas"] = ["token-efficient-tools-2025-02-19"]
+
         try:
-            create_resp = await client.messages.create(**api_params)
+            # Attempt to make the API call with retry logic for rate limits
+            max_retries = 5
+            retry_count = 0
+            create_resp = None
+            
+            while retry_count <= max_retries:
+                try:
+                    create_resp = await client.messages.create(**api_params)
+                    # Successful call, exit the retry loop
+                    break
+                except AnthropicAPIError as api_error:
+                    # Check if this is a rate limit error (429)
+                    if "429" in str(api_error) and retry_count < max_retries:
+                        retry_count += 1
+                        retry_wait = 60  # Default wait of 60 seconds
+                        
+                        logger.warning(f"Anthropic rate limit (429) encountered. Waiting {retry_wait} seconds before retry {retry_count}/{max_retries}")
+                        await asyncio.sleep(retry_wait)
+                        # Continue to next attempt in while loop
+                    else:
+                        # Not a rate limit error or we've exhausted retries
+                        raise  # Re-raise the error to be caught by outer exception handler
+            
+            if not create_resp:
+                raise Exception("Failed to get Anthropic API response after retries")
             
             # Handle the case where content might be a list of TextBlock objects
             if create_resp.content:
