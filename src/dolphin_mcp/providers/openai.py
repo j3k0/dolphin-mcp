@@ -124,6 +124,7 @@ async def generate_with_openai_sync(client: AsyncOpenAI, model_name: str, conver
                                   top_p: Optional[float] = None, max_tokens: Optional[int] = None) -> Dict:
     """Internal function for non-streaming generation"""
     try:
+        # print(f"Generating with OpenAI: {model_name}\n{conversation}\n{formatted_functions}\n{temperature}\n{top_p}\n{max_tokens}")
         response = await client.chat.completions.create(
             model=model_name,
             messages=conversation,
@@ -134,11 +135,11 @@ async def generate_with_openai_sync(client: AsyncOpenAI, model_name: str, conver
             tool_choice="auto",
             stream=False
         )
-
+        # print(f"Response: {response}")
         choice = response.choices[0]
         assistant_text = choice.message.content or ""
         tool_calls = []
-        
+
         if hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
             for tc in choice.message.tool_calls:
                 if tc.type == 'function':
@@ -155,6 +156,7 @@ async def generate_with_openai_sync(client: AsyncOpenAI, model_name: str, conver
                     except json.JSONDecodeError:
                         tool_call["function"]["arguments"] = "{}"
                     tool_calls.append(tool_call)
+            print(f"{assistant_text}")
         return {"assistant_text": assistant_text, "tool_calls": tool_calls}
 
     except APIError as e:
@@ -199,14 +201,64 @@ async def generate_with_openai(conversation: List[Dict], model_cfg: Dict,
             "parameters": func["parameters"]
         }
         formatted_functions.append(formatted_func)
+        
+    # Format conversation for OpenAI API format
+    formatted_conversation = []
+    for msg in conversation:
+        if "role" not in msg:
+            # Skip malformed messages
+            continue
+            
+        if msg["role"] == "tool":
+            # Format tool response messages
+            if "tool_call_id" in msg and "name" in msg and "content" in msg:
+                formatted_conversation.append({
+                    "role": "tool",
+                    "tool_call_id": msg["tool_call_id"],
+                    "name": msg.get("name", ""),
+                    "content": msg.get("content", "")
+                })
+        elif msg["role"] == "assistant":
+            # Format assistant messages that might have tool calls
+            formatted_msg = {"role": "assistant"}
+            
+            # Set content (must be present even if empty)
+            formatted_msg["content"] = msg.get("content", "")
+            
+            # Handle tool calls if present
+            if "tool_calls" in msg and msg["tool_calls"]:
+                # Format tool calls correctly for OpenAI API
+                formatted_tool_calls = []
+                for tc in msg["tool_calls"]:
+                    if "id" in tc and "function" in tc and "name" in tc["function"]:
+                        formatted_tool_call = {
+                            "id": tc["id"],
+                            "type": "function",  # This was missing
+                            "function": {
+                                "name": tc["function"]["name"],
+                                "arguments": tc["function"].get("arguments", "{}")
+                            }
+                        }
+                        formatted_tool_calls.append(formatted_tool_call)
+                
+                if formatted_tool_calls:
+                    formatted_msg["tool_calls"] = formatted_tool_calls
+            
+            formatted_conversation.append(formatted_msg)
+        else:
+            # User or system messages
+            formatted_conversation.append({
+                "role": msg["role"],
+                "content": msg.get("content", "")
+            })
 
     if stream:
         return generate_with_openai_stream(
-            client, model_name, conversation, formatted_functions,
+            client, model_name, formatted_conversation, formatted_functions,
             temperature, top_p, max_tokens
         )
     else:
         return await generate_with_openai_sync(
-            client, model_name, conversation, formatted_functions,
+            client, model_name, formatted_conversation, formatted_functions,
             temperature, top_p, max_tokens
         )
