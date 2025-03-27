@@ -512,7 +512,15 @@ async def run_interaction(
     # 4) Build conversation
     # Get system message - either from systemMessageFile, systemMessage, or default
     system_msg = "You are a helpful assistant."
-    if "systemMessageFile" in chosen_model:
+    if "systemMessageFiles" in chosen_model:
+        for file in chosen_model["systemMessageFiles"]:
+            try:
+                with open(file, "r", encoding="utf-8") as f:
+                    system_msg = f.read()
+                    conversation.append({"role": "system", "content": "File: " + file + "\n" + system_msg})
+            except Exception as e:
+                logger.warning(f"Failed to read system message file: {e}")
+    elif "systemMessageFile" in chosen_model:
         try:
             with open(chosen_model["systemMessageFile"], "r", encoding="utf-8") as f:
                 system_msg = f.read()
@@ -522,14 +530,6 @@ async def run_interaction(
             conversation.append({"role": "system", "content": chosen_model.get("systemMessage", system_msg)})
     else:
         conversation.append({"role": "system", "content": chosen_model.get("systemMessage", system_msg)})
-    if "systemMessageFiles" in chosen_model:
-        for file in chosen_model["systemMessageFiles"]:
-            try:
-                with open(file, "r", encoding="utf-8") as f:
-                    system_msg = f.read()
-                    conversation.append({"role": "system", "content": "File: " + file + "\n" + system_msg})
-            except Exception as e:
-                logger.warning(f"Failed to read system message file: {e}")
 
     async def add_interaction_to_file(interaction: Dict):
         if persist_conversation_to_file:
