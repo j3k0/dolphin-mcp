@@ -230,6 +230,38 @@ async def generate_with_anthropic(conversation, model_cfg, all_functions):
                         "content": msg.get("content")
                     }]
                 }
+                
+                # For compatibility with different tool response formats
+                # Some tool responses might have a complex JSON structure in the content field
+                # Try to handle various formats gracefully
+                try:
+                    content_value = msg.get("content", "")
+                    if isinstance(content_value, str):
+                        # Try to parse the content as JSON in case it contains nested content
+                        try:
+                            content_obj = json.loads(content_value)
+                            # If content contains a 'content' field with an array, extract it properly
+                            if isinstance(content_obj, dict) and "content" in content_obj and isinstance(content_obj["content"], list):
+                                # In some cases, the tool result might have a nested content structure from OpenAI
+                                # Extract the actual text content for Anthropic
+                                extracted_text = ""
+                                for item in content_obj["content"]:
+                                    if isinstance(item, dict) and "text" in item:
+                                        if item.get("type") == "text":
+                                            extracted_text += item["text"]
+                                
+                                if extracted_text:
+                                    # Replace the content with the extracted text
+                                    new_msg["content"][0]["content"] = extracted_text
+                                else:
+                                    # If we couldn't extract any text, provide a default non-whitespace value
+                                    new_msg["content"][0]["content"] = "Processing tool result..."
+                        except json.JSONDecodeError:
+                            # Not JSON, keep as is
+                            pass
+                except Exception as e:
+                    logger.warning(f"Error processing tool response format: {e}")
+                
                 non_system_messages.append(new_msg)
             elif role == "assistant" and isinstance(content, str) and msg.get("tool_calls"):
                 # Create a new message with content blocks for text and tool_use
@@ -238,6 +270,13 @@ async def generate_with_anthropic(conversation, model_cfg, all_functions):
                 # Add text block if there's content
                 if content:
                     last_assistant_content = {"type": "text", "text": content}
+                    new_msg["content"].append(last_assistant_content)
+                # Handle empty content for Anthropic compatibility
+                elif not content and msg.get("tool_calls"):
+                    # Add a placeholder text for empty content messages with tool calls
+                    # This is needed because Anthropic requires non-empty content for all messages
+                    # except the optional final assistant message
+                    last_assistant_content = {"type": "text", "text": f"using tool {msg.get('tool_calls')[0].get('id')}..."}
                     new_msg["content"].append(last_assistant_content)
                 
                 # Add tool_use blocks for each tool call
@@ -269,6 +308,12 @@ async def generate_with_anthropic(conversation, model_cfg, all_functions):
                 non_system_messages.append(new_msg)
             else:
                 # Keep user and assistant messages as they are
+                # But ensure assistant messages have non-empty content
+                if role == "assistant" and not content:
+                    # Anthropic requires non-empty content for all messages
+                    # except the optional final assistant message
+                    msg = msg.copy()  # Create a copy to avoid modifying the original
+                    msg["content"] = "using tool..."  # Non-whitespace text content
                 non_system_messages.append(msg)
 
         if get_caching_enabled() and last_assistant_content:
@@ -282,6 +327,19 @@ async def generate_with_anthropic(conversation, model_cfg, all_functions):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        
+        # Final check to ensure all messages have non-empty content for Anthropic compatibility
+        for msg in non_system_messages:
+            if msg.get("role") == "assistant" or msg.get("role") == "user":
+                # For messages with content as a list of blocks
+                if isinstance(msg.get("content"), list):
+                    for block in msg["content"]:
+                        if block.get("type") == "text" and (not block.get("text") or block["text"].isspace()):
+                            # Replace empty or whitespace-only content with non-whitespace text
+                            block["text"] = "Thinking..."
+                # For messages with content as a string
+                elif not msg.get("content") or (isinstance(msg.get("content"), str) and msg["content"].isspace()):
+                    msg["content"] = "Thinking..."
         
         # Format tools for Anthropic API
         if all_functions:
