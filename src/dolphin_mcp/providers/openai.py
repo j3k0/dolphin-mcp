@@ -4,9 +4,18 @@ OpenAI provider implementation for Dolphin MCP.
 
 import os
 import json
+import time
 from typing import Dict, List, Any, AsyncGenerator, Optional, Union
 
 from openai import AsyncOpenAI, APIError, RateLimitError
+
+# Get rate limit from env var (in seconds) or default to 60 seconds (1 minute)
+def get_rate_limit_seconds():
+    try:
+        return float(os.getenv("OPENAI_RATE_LIMIT_SECONDS", "1"))
+    except (ValueError, TypeError):
+        return 1.0
+
 
 async def generate_with_openai_stream(client: AsyncOpenAI, model_name: str, conversation: List[Dict],
                                     formatted_functions: List[Dict], temperature: Optional[float] = None,
@@ -126,6 +135,7 @@ async def generate_with_openai_sync(client: AsyncOpenAI, model_name: str, conver
     try:
         # print(f"Generating with OpenAI: {model_name}\n{conversation}\n{formatted_functions}\n{temperature}\n{top_p}\n{max_tokens}")
         response = await client.chat.completions.create(
+            extra_body={},
             model=model_name,
             messages=conversation,
             temperature=temperature,
@@ -157,6 +167,7 @@ async def generate_with_openai_sync(client: AsyncOpenAI, model_name: str, conver
                         tool_call["function"]["arguments"] = "{}"
                     tool_calls.append(tool_call)
             print(f"{assistant_text}")
+            time.sleep(get_rate_limit_seconds())
         return {"assistant_text": assistant_text, "tool_calls": tool_calls}
 
     except APIError as e:
