@@ -195,7 +195,7 @@ class MCPClient:
                     logger.info(f"Server {self.server_name}: Tool {tool_name} completed in {elapsed:.2f}s")
                     return resp["result"]
             await asyncio.sleep(0.1)  # Reduced sleep interval for more responsive streaming
-            if asyncio.get_event_loop().time() - start > 5 and asyncio.get_event_loop().time() - start < 5.15:  # Log warning after 5 seconds
+            if asyncio.get_event_loop().time() - start > 5 and asyncio.get_event_loop().time() - start < 5.1:  # Log warning after 5 seconds
                 print(f"Server {self.server_name}: Tool {tool_name} taking longer than 5s...")
                 logger.warning(f"Server {self.server_name}: Tool {tool_name} taking longer than 5s...")
         logger.error(f"Server {self.server_name}: Tool {tool_name} timed out after {timeout}s")
@@ -509,27 +509,34 @@ async def run_interaction(
 
     conversation = []
 
+    # format text with line numbers like cat -n
+    def add_line_numbers(text):
+        return "\n".join(f"{i+1}\t{line}" for i, line in enumerate(text.splitlines()))
+
     # 4) Build conversation
     # Get system message - either from systemMessageFile, systemMessage, or default
-    system_msg = "You are a helpful assistant."
     if "systemMessageFiles" in chosen_model:
         for file in chosen_model["systemMessageFiles"]:
             try:
                 with open(file, "r", encoding="utf-8") as f:
                     system_msg = f.read()
-                    conversation.append({"role": "system", "content": "File: " + file + "\n" + system_msg})
+                    conversation.append({"role": "system", "content": "Here is the output of cat -n " + file + "\n\n" + add_line_numbers(system_msg)})
             except Exception as e:
                 logger.warning(f"Failed to read system message file: {e}")
-    elif "systemMessageFile" in chosen_model:
+    
+    if "systemMessageFile" in chosen_model:
         try:
             with open(chosen_model["systemMessageFile"], "r", encoding="utf-8") as f:
                 system_msg = f.read()
+                conversation.append({"role": "system", "content": "Here is the output of cat -n " + chosen_model["systemMessageFile"] + "\n\n" + add_line_numbers(system_msg)})
         except Exception as e:
             logger.warning(f"Failed to read system message file: {e}")
-            # Fall back to direct systemMessage if available
-            conversation.append({"role": "system", "content": chosen_model.get("systemMessage", system_msg)})
-    else:
-        conversation.append({"role": "system", "content": chosen_model.get("systemMessage", system_msg)})
+
+    if "systemMessage" in chosen_model:
+        conversation.append({"role": "system", "content": chosen_model.get("systemMessage", "You are a helpful assistant.")})
+
+    if len(conversation) == 0:
+        conversation.append({"role": "system", "content": "You are a helpful assistant."})
 
     async def add_interaction_to_file(interaction: Dict):
         if persist_conversation_to_file:

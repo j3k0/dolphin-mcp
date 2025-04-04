@@ -20,6 +20,8 @@ async def cli_main():
         print("Usage: python dolphin_mcp.py [--model <n>] [--quiet] [--config <file>] [--log-messages <file>] [--conversation-file <file>] 'your question'")
         sys.exit(1)
 
+    print("dolphin-mcp\n- query: " + query + "\n- model: " + model + "\n")
+
     # Pass through to the package implementation
     final_text = await run_interaction(
         user_query=user_query,
@@ -30,7 +32,8 @@ async def cli_main():
         persist_conversation_to_file=conversation_file
     )
 
-    print("\n" + final_text.strip() + "\n")
+    print("\n\n" + final_text.strip() + "\n")
+    sys.exit(0)
 
 def main():
     """
