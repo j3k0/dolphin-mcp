@@ -5,6 +5,7 @@ OpenAI provider implementation for Dolphin MCP.
 import os
 import json
 import time
+import uuid
 from typing import Dict, List, Any, AsyncGenerator, Optional, Union
 
 from openai import AsyncOpenAI, APIError, RateLimitError
@@ -98,6 +99,9 @@ async def generate_with_openai_stream(client: AsyncOpenAI, model_name: str, conv
                             # Parse and validate JSON
                             parsed_args = json.loads(args)
                             tc["function"]["arguments"] = json.dumps(parsed_args)
+                            # Ensure ID exists
+                            if not tc.get("id"):
+                                tc["id"] = f"call_{uuid.uuid4()}"
                             final_tool_calls.append(tc)
                         except json.JSONDecodeError:
                             # If arguments are malformed, try to fix common issues
@@ -113,10 +117,16 @@ async def generate_with_openai_stream(client: AsyncOpenAI, model_name: str, conv
                                 # Try parsing again after fixes
                                 parsed_args = json.loads(args)
                                 tc["function"]["arguments"] = json.dumps(parsed_args)
+                                # Ensure ID exists
+                                if not tc.get("id"):
+                                    tc["id"] = f"call_{uuid.uuid4()}"
                                 final_tool_calls.append(tc)
                             except json.JSONDecodeError:
                                 # If still invalid, default to empty object
                                 tc["function"]["arguments"] = "{}"
+                                # Ensure ID exists
+                                if not tc.get("id"):
+                                    tc["id"] = f"call_{uuid.uuid4()}"
                                 final_tool_calls.append(tc)
 
                 yield {
@@ -130,7 +140,7 @@ async def generate_with_openai_stream(client: AsyncOpenAI, model_name: str, conv
 
 async def generate_with_openai_sync(client: AsyncOpenAI, model_name: str, conversation: List[Dict], 
                                   formatted_functions: List[Dict], temperature: Optional[float] = None,
-                                  top_p: Optional[float] = None, max_tokens: Optional[int] = None) -> Dict:
+                                  top_p: Optional[float] = None, max_tokens: Optional[int] = None, num_retries: int = 3) -> Dict:
     """Internal function for non-streaming generation"""
     try:
         # print(f"Generating with OpenAI: {model_name}\n{conversation}\n{formatted_functions}\n{temperature}\n{top_p}\n{max_tokens}")
@@ -140,42 +150,96 @@ async def generate_with_openai_sync(client: AsyncOpenAI, model_name: str, conver
             messages=conversation,
             temperature=temperature,
             top_p=top_p,
-            max_tokens=max_tokens,
+            max_tokens=32000, # max_tokens,
             tools=[{"type": "function", "function": f} for f in formatted_functions],
             tool_choice="auto",
             stream=False
         )
-        # print(f"Response: {response}")
+        
+        # Log the raw response for debugging
+        # print(f"Raw OpenAI Response: {response.model_dump_json(indent=2)}")
+
+        if not response.choices:
+            time.sleep(get_rate_limit_seconds())
+            if num_retries > 0:
+                return await generate_with_openai_sync(client, model_name, conversation, formatted_functions, temperature, top_p, max_tokens, num_retries - 1)
+            else:
+                return {"assistant_text": "OpenAI error: No choices returned in the response.", "tool_calls": []}
+
         choice = response.choices[0]
+
+        if choice.message is None:
+            # Handle cases where the message object itself might be missing
+            finish_reason = choice.finish_reason or "unknown"
+            return {"assistant_text": f"OpenAI error: No message found in the response choice. Finish reason: {finish_reason}", "tool_calls": []}
+
         assistant_text = choice.message.content or ""
         tool_calls = []
 
-        if hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
-            for tc in choice.message.tool_calls:
+        # Use getattr for safer access to tool_calls, check it's not None
+        message_tool_calls = getattr(choice.message, 'tool_calls', None)
+        if message_tool_calls:
+            print(f"\n{assistant_text}\n")
+            for tc in message_tool_calls:
                 if tc.type == 'function':
-                    tool_call = {
-                        "id": tc.id,
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments or "{}"
+                    # Ensure function and its attributes exist
+                    if tc.function and tc.function.name:
+                        tool_call = {
+                            "id": tc.id,
+                            "function": {
+                                "name": tc.function.name,
+                                # Provide default empty string if arguments is None
+                                "arguments": tc.function.arguments or "{}" 
+                            }
                         }
-                    }
-                    # Ensure arguments is valid JSON
-                    try:
-                        json.loads(tool_call["function"]["arguments"])
-                    except json.JSONDecodeError:
-                        tool_call["function"]["arguments"] = "{}"
+                        # Ensure arguments is valid JSON
+                        try:
+                            json.loads(tool_call["function"]["arguments"])
+                        except (json.JSONDecodeError, TypeError): # Added TypeError for safety
+                            # Attempt to fix common issues or default to empty object
+                            args_str = str(tool_call["function"]["arguments"]).strip()
+                            if not args_str or args_str.isspace():
+                                tool_call["function"]["arguments"] = "{}"
+                            else:
+                                # Minimal fix attempt (e.g., wrap if not bracketed)
+                                if not args_str.startswith("{") or not args_str.endswith("}"):
+                                     args_str = f"{{{args_str}}}" # Basic wrapping, might not always work
+                                try:
+                                    json.loads(args_str)
+                                    tool_call["function"]["arguments"] = args_str
+                                except json.JSONDecodeError:
+                                     tool_call["function"]["arguments"] = "{}" # Fallback
                     tool_calls.append(tool_call)
-            print(f"{assistant_text}")
-            time.sleep(get_rate_limit_seconds())
+
+            # Ensure all tool calls have an ID before returning
+            for tc in tool_calls:
+                if not tc.get("id"):
+                    tc["id"] = f"call_{uuid.uuid4()}"
+
         return {"assistant_text": assistant_text, "tool_calls": tool_calls}
 
     except APIError as e:
+        print(f"OpenAI API Error encountered: Status Code: {e.status_code}, Body: {e.body}")
         return {"assistant_text": f"OpenAI API error: {str(e)}", "tool_calls": []}
     except RateLimitError as e:
+        print(f"OpenAI Rate Limit Error encountered: {e}")
         return {"assistant_text": f"OpenAI rate limit: {str(e)}", "tool_calls": []}
     except Exception as e:
-        return {"assistant_text": f"Unexpected OpenAI error: {str(e)}", "tool_calls": []}
+        # Add more context to the generic exception log
+        response_summary = "No response object available"
+        try:
+            # Try to safely get some info from the response if it exists
+            if 'response' in locals() and response:
+                 response_summary = f"Response ID: {getattr(response, 'id', 'N/A')}, Model: {getattr(response, 'model', 'N/A')}, Choices count: {len(response.choices) if response.choices else 0}"
+                 if response.choices and response.choices[0]:
+                     response_summary += f", Finish Reason: {getattr(response.choices[0], 'finish_reason', 'N/A')}"
+        except Exception as inner_e:
+            response_summary = f"Could not summarize response: {inner_e}"
+            
+        print(f"Unexpected error during OpenAI sync generation: {e.__class__.__name__}: {str(e)}. Response summary: {response_summary}")
+        import traceback
+        traceback.print_exc() # Print traceback for detailed debugging
+        return {"assistant_text": f"Unexpected OpenAI error: {e.__class__.__name__}: {str(e)}", "tool_calls": []}
 
 async def generate_with_openai(conversation: List[Dict], model_cfg: Dict, 
                              all_functions: List[Dict], stream: bool = False) -> Union[Dict, AsyncGenerator]:
