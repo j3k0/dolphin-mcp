@@ -10,9 +10,9 @@ import dotenv
 from typing import Dict, Optional
 
 # Configure logging
-logging.basicConfig(level=logging.CRITICAL)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dolphin_mcp")
-logger.setLevel(logging.CRITICAL)
+logger.setLevel(logging.INFO)
 
 # Load environment variables
 dotenv.load_dotenv(override=True)

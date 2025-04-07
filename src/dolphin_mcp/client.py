@@ -45,9 +45,16 @@ class MCPClient:
                     message = json.loads(line.decode().strip())
                     self._process_message(message)
                 except json.JSONDecodeError:
-                    pass
-        except Exception:
-            pass
+                    logger.error(f"Server {self.server_name}: Failed to decode JSON line: {line.decode().strip()}")
+                except Exception as e:
+                    logger.error(f"Server {self.server_name}: Error processing message: {str(e)}")
+        except asyncio.CancelledError:
+            logger.info(f"Server {self.server_name}: Receive loop cancelled.")
+            raise # Re-raise CancelledError to ensure cleanup happens correctly
+        except Exception as e:
+            # Log other potential exceptions from the readline() or at_eof() checks
+            logger.error(f"Server {self.server_name}: Error in receive loop: {str(e)}")
+            # Optionally, consider if this error should trigger a shutdown or restart
 
     def _process_message(self, message: dict):
         if "jsonrpc" in message and "id" in message:
@@ -180,8 +187,15 @@ class MCPClient:
         }
         await self._send_message(req)
 
+        timeouts_by_tool = {
+            "inspect_graph": 600,
+            "inspect_files": 600,
+            "browser_use": 600,
+            "run_command": 300,
+        }
+
         start = asyncio.get_event_loop().time()
-        timeout = 300 # Timeout 5 minutes
+        timeout = timeouts_by_tool.get(tool_name, 30)
         while asyncio.get_event_loop().time() - start < timeout:
             # print(json.dumps(self.responses))
             if rid in self.responses:
@@ -196,10 +210,10 @@ class MCPClient:
                     return resp["result"]
             await asyncio.sleep(0.1)  # Reduced sleep interval for more responsive streaming
             if asyncio.get_event_loop().time() - start > 5 and asyncio.get_event_loop().time() - start < 5.1:  # Log warning after 5 seconds
-                print(f"Server {self.server_name}: Tool {tool_name} taking longer than 5s...")
+                # print(f"Server {self.server_name}: Tool {tool_name} taking longer than 5s...")
                 logger.warning(f"Server {self.server_name}: Tool {tool_name} taking longer than 5s...")
-        logger.error(f"Server {self.server_name}: Tool {tool_name} timed out after {timeout}s")
-        return {"error": f"Timeout waiting for tool result after {timeout}s"}
+        logger.error(f"Server {self.server_name}: Tool {tool_name} (request_id={rid}) timed out after {timeout}s")
+        return {"error": f"Timeout waiting for tool {tool_name} result (request_id={rid}) after {timeout}s"}
 
     async def _send_message(self, message: dict):
         if not self.process or self._shutdown:

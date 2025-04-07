@@ -6,9 +6,21 @@ import os
 import json
 import time
 import uuid
+import logging
 from typing import Dict, List, Any, AsyncGenerator, Optional, Union
 
 from openai import AsyncOpenAI, APIError, RateLimitError
+
+logger = logging.getLogger("dolphin_mcp")
+
+CONTINUATION_MESSAGES = [
+    {"role": "user", "content": "Make sure to continue your current task from where it left off."},
+    {"role": "user", "content": "Keep it up!"},
+    {"role": "user", "content": "Please continue."},
+    {"role": "user", "content": "You're doing great!"},
+    {"role": "user", "content": "You're amazing! Please continue."},
+]
+
 
 # Get rate limit from env var (in seconds) or default to 60 seconds (1 minute)
 def get_rate_limit_seconds():
@@ -162,6 +174,7 @@ async def generate_with_openai_sync(client: AsyncOpenAI, model_name: str, conver
         if not response.choices:
             time.sleep(get_rate_limit_seconds())
             if num_retries > 0:
+                conversation.append(CONTINUATION_MESSAGES[(num_retries - 1) % len(CONTINUATION_MESSAGES)])
                 return await generate_with_openai_sync(client, model_name, conversation, formatted_functions, temperature, top_p, max_tokens, num_retries - 1)
             else:
                 return {"assistant_text": "OpenAI error: No choices returned in the response.", "tool_calls": []}
@@ -219,10 +232,19 @@ async def generate_with_openai_sync(client: AsyncOpenAI, model_name: str, conver
         return {"assistant_text": assistant_text, "tool_calls": tool_calls}
 
     except APIError as e:
-        print(f"OpenAI API Error encountered: Status Code: {e.status_code}, Body: {e.body}")
+        logger.error(f"OpenAI API Error encountered: Status Code: {e.status_code}, Body: {e.body},")
+        if num_retries > 0:
+            logger.info(f"Retrying OpenAI API call in 60 seconds...")
+            time.sleep(60)
+            conversation.append(CONTINUATION_MESSAGES[(num_retries - 1) % len(CONTINUATION_MESSAGES)])
+            return await generate_with_openai_sync(client, model_name, conversation, formatted_functions, temperature, top_p, max_tokens, num_retries - 1)
+        logger.fatal(f"Returning fatal error: {e}")
         return {"assistant_text": f"OpenAI API error: {str(e)}", "tool_calls": []}
     except RateLimitError as e:
-        print(f"OpenAI Rate Limit Error encountered: {e}")
+        logger.error(f"OpenAI Rate Limit Error encountered: {e}")
+        if num_retries > 0:
+            time.sleep(60)
+            return await generate_with_openai_sync(client, model_name, conversation, formatted_functions, temperature, top_p, max_tokens, num_retries - 1)
         return {"assistant_text": f"OpenAI rate limit: {str(e)}", "tool_calls": []}
     except Exception as e:
         # Add more context to the generic exception log
@@ -258,9 +280,9 @@ async def generate_with_openai(conversation: List[Dict], model_cfg: Dict,
     """
     api_key = model_cfg.get("apiKey") or os.getenv("OPENAI_API_KEY")
     if "apiBase" in model_cfg:
-        client = AsyncOpenAI(api_key=api_key, base_url=model_cfg["apiBase"])
+        client = AsyncOpenAI(api_key=api_key, base_url=model_cfg["apiBase"], max_retries=5)
     else:
-        client = AsyncOpenAI(api_key=api_key)
+        client = AsyncOpenAI(api_key=api_key, max_retries=5)
 
     model_name = model_cfg["model"]
     temperature = model_cfg.get("temperature", None)
